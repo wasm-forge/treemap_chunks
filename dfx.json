@@ -1,0 +1,17 @@
+{
+  "canisters": {
+    "treemap_chunks_backend": {
+      "candid": "src/treemap_chunks_backend/treemap_chunks_backend.did",
+      "package": "treemap_chunks_backend",
+      "type": "rust"
+    }
+  },
+  "defaults": {
+    "build": {
+      "args": "",
+      "packtool": ""
+    }
+  },
+  "output_env_file": ".env",
+  "version": 1
+}
