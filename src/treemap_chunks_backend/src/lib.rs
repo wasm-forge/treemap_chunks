@@ -1,4 +1,4 @@
-use std::cell::RefCell;
+use std::{borrow::BorrowMut, cell::RefCell, ops::Range};
 
 use ic_stable_structures::{memory_manager::{MemoryId, MemoryManager}, storable::Bound, DefaultMemoryImpl, StableBTreeMap};
 
@@ -41,10 +41,11 @@ impl ic_stable_structures::Storable for MyChunk {
     }
 
     const BOUND: Bound = Bound::Bounded {
-        max_size: 150_000_000,
+        max_size: 100_000_000,
         is_fixed_size: false
     };
 }
+
 
 #[derive(Clone)]
 struct MyChunk4k(Vec<u8>);
@@ -67,7 +68,7 @@ impl ic_stable_structures::Storable for MyChunk4k {
 
 
 thread_local! {
-    static BUFFER: RefCell<Option<MyChunk>> = RefCell::new(None);
+    static BUFFER: RefCell<Option<Vec<u8>>> = RefCell::new(None);
     
     static MAP: RefCell<StableBTreeMap<u64, MyChunk, Memory>> = RefCell::new(
         StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(110))))
@@ -80,48 +81,49 @@ thread_local! {
 
 
 #[ic_cdk::update]
-pub fn append_chunk(text: String, times: usize) -> usize {
+pub fn append_buffer(text: String, times: usize) -> usize {
 
-    let res = BUFFER.with(|chunk| {
-        let mut chunk = chunk.borrow_mut();
+    let res = BUFFER.with(|buf| {
+        let mut buf = buf.borrow_mut();
 
         let total_length = text.len() * times;
 
-        if chunk.is_none() {
-            *chunk = Some(MyChunk(Vec::with_capacity(total_length)));
+        if buf.is_none() {
+            *buf = Some(Vec::with_capacity(total_length));
         }
 
-        let chunk = chunk.as_mut().unwrap();
+        let buf = buf.as_mut().unwrap();
 
         for _ in 0..times {
-            chunk.0.extend_from_slice(&text.as_ref());
+            buf.extend_from_slice(&text.as_ref());
         }
 
-        chunk.0.len()
+        buf.len()
     });
 
     res
 }
 
+
 #[ic_cdk::update]
-pub fn store_chunk(key: u64) -> (u64, usize) {
+pub fn store_buffer(key: u64) -> (u64, usize) {
     let stime = ic_cdk::api::instruction_counter();    
 
-    let res = BUFFER.with(|chunk| {
+    let res = BUFFER.with(|buf| {
 
-        let chunk = chunk.borrow_mut();
+        let buf = buf.borrow_mut();
 
-        let chunk = chunk.as_ref();
+        let buf = buf.as_ref();
         
-        let chunk = chunk.unwrap();
+        let buf = buf.unwrap();
 
-        let len = (*chunk).0.len();
+        let len = (*buf).len();
 
         MAP.with(|mp| {
 
             let mut mp = mp.borrow_mut();
 
-            mp.insert(key, (*chunk).clone());
+            mp.insert(key, MyChunk((*buf).clone()));
         });
 
         len
@@ -132,17 +134,18 @@ pub fn store_chunk(key: u64) -> (u64, usize) {
     (etime - stime, res)
 }
 
+
 #[ic_cdk::update]
-pub fn store_chunk_4k(key: u64) -> (u64, usize) {
+pub fn store_buffer_4k(key: u64) -> (u64, usize, usize) {
     let stime = ic_cdk::api::instruction_counter();    
 
-    let res = BUFFER.with(|chunk| {
+    let (res, idx) = BUFFER.with(|buf| {
 
-        let mut chunk = chunk.borrow_mut();
+        let mut buf = buf.borrow_mut();
 
-        let chunk = chunk.take();
+        let buf = buf.take();
         
-        let chunk = chunk.unwrap();
+        let buf = buf.unwrap();
 
         let mut len = 0;
 
@@ -153,14 +156,14 @@ pub fn store_chunk_4k(key: u64) -> (u64, usize) {
 
             loop {
 
-                let upper = std::cmp::min((&chunk.0).len(), ((idx+1)*CHUNK_SIZE) as usize);
-                let lower = std::cmp::min((&chunk.0).len(), (idx*CHUNK_SIZE) as usize);
+                let upper = std::cmp::min((&buf).len(), ((idx+1)*CHUNK_SIZE) as usize);
+                let lower = std::cmp::min((&buf).len(), (idx*CHUNK_SIZE) as usize);
 
                 if lower==upper {
                     break;
                 }
 
-                let slice = &chunk.0[lower..upper];
+                let slice = &buf[lower..upper];
 
                 let mut vec: Vec<u8> = Vec::with_capacity(CHUNK_SIZE);
                 vec.extend_from_slice(slice);
@@ -177,6 +180,77 @@ pub fn store_chunk_4k(key: u64) -> (u64, usize) {
             };
         });
 
+        (len, idx)
+    });
+
+    let etime = ic_cdk::api::instruction_counter();    
+
+    (etime - stime, res, idx)
+}
+
+
+#[ic_cdk::update]
+pub fn load_buffer(key: u64) -> (u64, usize) {
+    let stime = ic_cdk::api::instruction_counter();    
+
+    let res = BUFFER.with(|buf| {
+
+        let mut buf = buf.borrow_mut();
+        
+        MAP.with(|mp| {
+
+            let mp = mp.borrow_mut();
+
+            let read = mp.get(&key).unwrap();
+
+            *buf = Some(read.0);
+        });
+
+        (*buf).as_ref().unwrap().len()
+    });
+
+    let etime = ic_cdk::api::instruction_counter();    
+
+    (etime - stime, res)
+}
+
+
+#[ic_cdk::update]
+pub fn load_buffer_4k(key: u64) -> (u64, usize) {
+    let stime = ic_cdk::api::instruction_counter();    
+
+    let res = BUFFER.with(|buf| {
+
+        let mut buf = buf.borrow_mut();
+
+        if buf.is_none() {
+            *buf = Some(Vec::new());
+        }
+
+        let buf = buf.as_mut().unwrap();
+        
+        let mut len = 0;
+
+        let mut idx = 0;
+
+        MAP4K.with(|mp| {
+    
+            let mp = mp.borrow_mut();
+
+            loop {
+                let read = mp.get(&(key, idx));
+
+                if let Some(chunk) = read {
+                    len += chunk.0.len();
+                    buf.extend_from_slice(&chunk.0[..]);
+                    idx += 1;
+                } else {
+                    break;
+                }
+            }
+
+        });
+
         len
     });
 
@@ -185,24 +259,42 @@ pub fn store_chunk_4k(key: u64) -> (u64, usize) {
     (etime - stime, res)
 }
 
+
 #[ic_cdk::update]
-pub fn load_chunk_map(key: u64) -> (u64, usize) {
-    let stime = ic_cdk::api::instruction_counter();    
+pub fn load_buffer_4k_ranged(key: u64) -> (u64, usize) {
+    let stime = ic_cdk::api::instruction_counter();
 
-    let res = BUFFER.with(|chunk| {
+    let res = BUFFER.with(|buf| {
 
-        let mut chunk = chunk.borrow_mut();
+        let mut buf = buf.borrow_mut();
+
+        if buf.is_none() {
+            *buf = Some(Vec::new());
+        }
+
+        let buf = buf.as_mut().unwrap();
         
-        MAP.with(|mp| {
+        let mut len = 0;
 
+        MAP4K.with(|mp| {
+    
             let mp = mp.borrow_mut();
 
-            let read = mp.get(&key).unwrap();
+            let range = Range { 
+                start: (key, 0), 
+                end: (key + 1, 0)
+            };
 
-            *chunk = Some(read);
+            let iter = mp.range(range);
+
+            for ((_, _idx), chunk) in iter {
+                len += chunk.0.len();
+                buf.extend_from_slice(&chunk.0[..]);
+            }
+
         });
 
-        (*chunk).as_ref().unwrap().0.len()
+        len
     });
 
     let etime = ic_cdk::api::instruction_counter();    
@@ -214,66 +306,69 @@ pub fn load_chunk_map(key: u64) -> (u64, usize) {
 
 #[ic_cdk::init]
 fn init() {
-    profiling_init();
+    //profiling_init();
 }
 
 
 #[ic_cdk::update]
-pub fn clear_chunk() {
+pub fn clear_buffer() {
 
-    BUFFER.with(|chunk| {
-        let mut chunk = chunk.borrow_mut();
+    BUFFER.with(|buf| {
+        let mut buf = buf.borrow_mut();
 
-        if chunk.is_none() {
+        if buf.is_none() {
             return;
         }
 
-        let chunk = chunk.as_mut().unwrap();
+        let buf = buf.as_mut().unwrap();
 
-        chunk.0.clear()
+        buf.clear()
     })
 }
 
+
 #[ic_cdk::update]
-pub fn zero_chunk() {
+pub fn zero_buffer() {
 
-    BUFFER.with(|chunk| {
-        let mut chunk = chunk.borrow_mut();
+    BUFFER.with(|buf| {
+        let mut buf = buf.borrow_mut();
 
-        if chunk.is_none() {
+        if buf.is_none() {
             return;
         }
 
-        let chunk = chunk.as_mut().unwrap();
+        let buf = buf.as_mut().unwrap();
 
         // explicitly destroy contents
-        for i in 0..chunk.0.len() {
-            chunk.0[i] = 0;
+        for i in 0..buf.len() {
+            buf[i] = 0;
         }
 
     })
 }
 
+
 #[ic_cdk::update]
-pub fn read_chunk(offset: usize, size: usize) -> String {
+pub fn read_buffer(offset: usize, size: usize) -> String {
 
-    BUFFER.with(|chunk| {
-        let mut chunk = chunk.borrow_mut();
+    BUFFER.with(|buf| {
+        let mut buf = buf.borrow_mut();
 
-        let chunk = chunk.as_mut().unwrap();
+        let buf = buf.as_mut().unwrap();
 
-        std::str::from_utf8(&chunk.0[offset..offset+size]).unwrap().to_string()
+        std::str::from_utf8(&buf[offset..offset+size]).unwrap().to_string()
     })
 }
+
 
 #[ic_cdk::update]
 pub fn chunk_size() -> usize {
 
-    BUFFER.with(|chunk| {
-        let mut chunk = chunk.borrow_mut();
+    BUFFER.with(|buf| {
+        let mut buf = buf.borrow_mut();
 
-        let chunk = chunk.as_mut().unwrap();
+        let buf = buf.as_mut().unwrap();
 
-        chunk.0.len()
+        buf.len()
     })
 }
