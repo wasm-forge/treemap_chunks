@@ -1,2 +1,2 @@
-# btreemap_chunks
+# treemap_chunks
 Test project estimating writing many chunks into stable BTreeMap
