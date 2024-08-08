@@ -1,23 +1,10 @@
-use std::{borrow::BorrowMut, cell::RefCell, ops::Range};
+use std::{cell::RefCell, ops::Range};
 
+use ic_cdk::api::stable::WASM_PAGE_SIZE_IN_BYTES;
 use ic_stable_structures::{memory_manager::{MemoryId, MemoryManager}, storable::Bound, DefaultMemoryImpl, StableBTreeMap};
 
 use ic_stable_structures::memory_manager::VirtualMemory;
 
-
-#[ic_cdk::query]
-fn greet(name: String) -> String {
-    format!("Hello, {}!", name)
-}
-
-const PROFILING: MemoryId = MemoryId::new(100);
-
-pub fn profiling_init() {
-    let memory = MEMORY_MANAGER.with(|m| m.borrow().get(PROFILING));
-    ic_stable_structures::Memory::grow(&memory, 4096);
-}
-
-////////////////////////////////////////
  
 const CHUNK_SIZE: usize = 4096;
 
@@ -25,6 +12,7 @@ thread_local! {
     static MEMORY_MANAGER: RefCell<MemoryManager<DefaultMemoryImpl>> =
         RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
 }
+
 
 type Memory = VirtualMemory<DefaultMemoryImpl>;
 
@@ -41,7 +29,7 @@ impl ic_stable_structures::Storable for MyChunk {
     }
 
     const BOUND: Bound = Bound::Bounded {
-        max_size: 100_000_000,
+        max_size: 101_000_000,
         is_fixed_size: false
     };
 }
@@ -69,7 +57,8 @@ impl ic_stable_structures::Storable for MyChunk4k {
 
 thread_local! {
     static BUFFER: RefCell<Option<Vec<u8>>> = RefCell::new(None);
-    
+
+
     static MAP: RefCell<StableBTreeMap<u64, MyChunk, Memory>> = RefCell::new(
         StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(110))))
     );
@@ -77,6 +66,9 @@ thread_local! {
     static MAP4K: RefCell<StableBTreeMap<(u64, u64), MyChunk4k, Memory>> = RefCell::new(
         StableBTreeMap::init(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(111))))
     );
+
+    static CUSTOM: RefCell<Memory> = RefCell::new(MEMORY_MANAGER.with(|m| m.borrow().get(MemoryId::new(116))));
+
 }
 
 
@@ -136,14 +128,57 @@ pub fn store_buffer(key: u64) -> (u64, usize) {
 
 
 #[ic_cdk::update]
+pub fn store_memory(offset: u64) -> (u64, usize) {
+    use ic_stable_structures::Memory;
+
+    let stime = ic_cdk::api::instruction_counter();    
+
+    let res = BUFFER.with(|buf| {
+
+        let buf = buf.borrow_mut();
+
+        let buf = buf.as_ref();
+        
+        let buf = buf.unwrap();
+
+        let len = (*buf).len();
+
+        CUSTOM.with(|mp| {
+
+            let mp = mp.borrow_mut();
+
+            let max_address = offset + len as u64;
+
+            let pages_required = (max_address + WASM_PAGE_SIZE_IN_BYTES - 1) / WASM_PAGE_SIZE_IN_BYTES;
+
+            let cur_pages = mp.size();
+        
+            if cur_pages < pages_required {
+                mp.grow(pages_required - cur_pages);
+            }
+
+            mp.write(offset, buf);
+
+        });
+
+        len
+    });
+
+    let etime = ic_cdk::api::instruction_counter();    
+
+    (etime - stime, res)
+}
+
+
+#[ic_cdk::update]
 pub fn store_buffer_4k(key: u64) -> (u64, usize, usize) {
     let stime = ic_cdk::api::instruction_counter();    
 
     let (res, idx) = BUFFER.with(|buf| {
 
-        let mut buf = buf.borrow_mut();
+        let buf = buf.borrow_mut();
 
-        let buf = buf.take();
+        let buf = buf.as_ref();
         
         let buf = buf.unwrap();
 
@@ -155,7 +190,6 @@ pub fn store_buffer_4k(key: u64) -> (u64, usize, usize) {
             let mut mp = mp.borrow_mut();
 
             loop {
-
                 let upper = std::cmp::min((&buf).len(), ((idx+1)*CHUNK_SIZE) as usize);
                 let lower = std::cmp::min((&buf).len(), (idx*CHUNK_SIZE) as usize);
 
@@ -188,6 +222,8 @@ pub fn store_buffer_4k(key: u64) -> (u64, usize, usize) {
     (etime - stime, res, idx)
 }
 
+////////////////////////////////////////////////////////////////////////////////////////////////////////
+/// 
 
 #[ic_cdk::update]
 pub fn load_buffer(key: u64) -> (u64, usize) {
