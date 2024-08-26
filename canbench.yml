@@ -1,0 +1,6 @@
+build_cmd:
+  ./build.sh
+
+wasm_path:
+  ./target/wasm32-unknown-unknown/release/treemap_chunks_backend.wasm
+

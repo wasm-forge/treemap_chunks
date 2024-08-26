@@ -13,7 +13,6 @@ thread_local! {
         RefCell::new(MemoryManager::init(DefaultMemoryImpl::default()));
 }
 
-
 type Memory = VirtualMemory<DefaultMemoryImpl>;
 
 #[derive(Clone)]
@@ -128,7 +127,7 @@ pub fn store_buffer(key: u64) -> (u64, usize) {
 
 
 #[ic_cdk::update]
-pub fn store_memory(offset: u64) -> (u64, usize) {
+pub fn store_into_memory(offset: u64) -> (u64, usize) {
     use ic_stable_structures::Memory;
 
     let stime = ic_cdk::api::instruction_counter();    
@@ -223,7 +222,6 @@ pub fn store_buffer_4k(key: u64) -> (u64, usize, usize) {
 }
 
 ////////////////////////////////////////////////////////////////////////////////////////////////////////
-/// 
 
 #[ic_cdk::update]
 pub fn load_buffer(key: u64) -> (u64, usize) {
@@ -338,13 +336,6 @@ pub fn load_buffer_4k_ranged(key: u64) -> (u64, usize) {
     (etime - stime, res)
 }
 
-////////////////////////////////////////////////////////////
-
-#[ic_cdk::init]
-fn init() {
-    //profiling_init();
-}
-
 
 #[ic_cdk::update]
 pub fn clear_buffer() {
@@ -398,7 +389,7 @@ pub fn read_buffer(offset: usize, size: usize) -> String {
 
 
 #[ic_cdk::update]
-pub fn chunk_size() -> usize {
+pub fn buffer_size() -> usize {
 
     BUFFER.with(|buf| {
         let mut buf = buf.borrow_mut();
@@ -407,4 +398,136 @@ pub fn chunk_size() -> usize {
 
         buf.len()
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::RefCell, fs, sync::Once};
+
+    use crate::{append_buffer, store_into_memory};
+    use pocket_ic::{PocketIc, PocketIcBuilder};
+    const WASM_PATH: &str = "../../target/wasm32-unknown-unknown/release/treemap_chunks_backend.wasm";
+    use candid::Principal;
+
+    thread_local!(
+        static ACTIVE_CANISTER: RefCell<Option<Principal>> = const { RefCell::new(None) };
+    );
+    
+    fn set_active_canister(new_canister: Principal) {
+        ACTIVE_CANISTER.with(|canister_cell| {
+            let mut canister = canister_cell.borrow_mut();
+            *canister = Some(new_canister);
+        })
+    }
+    
+    fn active_canister() -> Principal {
+        ACTIVE_CANISTER.with(|canister_cell| {
+            let canister = *canister_cell.borrow();
+            canister.unwrap()
+        })
+    }
+
+    static INIT: Once = Once::new();
+
+    fn build_test_project() {
+        INIT.call_once(|| {
+            use std::process::Command;
+
+            let _ = Command::new("bash")
+                .arg("../../build.sh")
+                .output()
+                .expect("Failed to execute command");
+
+        });
+    }
+
+    fn setup_initial_canister() -> PocketIc {
+        build_test_project();
+
+        let pic = PocketIc::new();
+//        let pic = PocketIcBuilder::new().with_benchmarking_system_subnet().build();
+    
+        let wasm = fs::read(WASM_PATH).expect("Wasm file not found, run 'dfx build'.");
+    
+        let backend_canister = pic.create_canister();
+    
+        pic.add_cycles(backend_canister, 1_000_000_000_000_000);
+    
+        set_active_canister(backend_canister);
+    
+        pic.install_canister(backend_canister, wasm, vec![], None);
+    
+        pic.tick();
+    
+        pic
+    }
+
+
+    mod fns {
+
+        use candid::{decode_args, decode_one, encode_one, Principal};
+        use pocket_ic::{PocketIc, WasmResult};
+
+        use super::active_canister;
+    
+        pub(crate) fn append_buffer(pic: &PocketIc, content: &str, count: u64) {
+            pic.update_call(
+                active_canister(),
+                Principal::anonymous(),
+                "append_buffer",
+                candid::encode_args((content.to_string(), count)).unwrap(),
+            )
+            .unwrap();
+        }
+    
+        pub(crate) fn store_into_memory(pic: &PocketIc) -> (u64, u64) {
+            let response = pic
+                .update_call(
+                    active_canister(),
+                    Principal::anonymous(),
+                    "store_into_memory",
+                    candid::encode_one(0u64).unwrap(),
+                )
+                .unwrap();
+    
+            if let WasmResult::Reply(response) = response {
+                let result: (u64, u64) = decode_args(&response).unwrap();
+    
+                result
+            } else {
+                panic!("unintended call failure!");
+            }
+        }
+    }    
+
+
+    #[test]
+    fn write_memory_test() {
+        let pic = setup_initial_canister();
+
+        fns::append_buffer(&pic, "abc1234567", 10_000_000);
+
+        let (time, _size) = fns::store_into_memory(&pic);
+
+        panic!("Time elapsed: {}", time);
+    }
+
+}
+
+
+
+#[cfg(feature = "canbench-rs")]
+mod benches {
+    use canbench_rs::{bench, bench_fn, BenchResult};
+
+    use crate::{append_buffer, store_into_memory};
+
+    #[bench(raw)]
+    fn write_memory_bench() -> BenchResult {
+        append_buffer("abc1234567".to_string(), 10_000_000);
+
+        bench_fn(|| {
+            store_into_memory(0);
+        })
+    }
 }
