@@ -1,0 +1,23 @@
+benches:
+  store_buffer_bench:
+    total:
+      calls: 1
+      instructions: 324507107
+      heap_increase: 3052
+      stable_memory_increase: 12801
+    scopes: {}
+  store_chunks_4k_bench:
+    total:
+      calls: 1
+      instructions: 4895450885
+      heap_increase: 1
+      stable_memory_increase: 2561
+    scopes: {}
+  store_memory_bench:
+    total:
+      calls: 1
+      instructions: 124481550
+      heap_increase: 0
+      stable_memory_increase: 1537
+    scopes: {}
+version: 0.2.0

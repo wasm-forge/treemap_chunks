@@ -1,3 +1,14 @@
+
 service : {
-    "greet": (text) -> (text) query;
+  append_buffer : (text, nat64) -> (nat64);
+  buffer_size : () -> (nat64);
+  clear_buffer : () -> ();
+  load_buffer : (nat64) -> (nat64, nat64);
+  load_buffer_4k : (nat64) -> (nat64, nat64);
+  load_buffer_4k_ranged : (nat64) -> (nat64, nat64);
+  read_buffer : (nat64, nat64) -> (text);
+  store_buffer : (nat64) -> (nat64, nat64);
+  store_buffer_4k : (nat64) -> (nat64, nat64, nat64);
+  store_into_memory : (nat64) -> (nat64, nat64);
+  zero_buffer : () -> ();
 }
